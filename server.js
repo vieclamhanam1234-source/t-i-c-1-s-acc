@@ -232,7 +232,9 @@ function isAllowed(ctx) {
 }
 
 bot.use(async (ctx, next) => {
+  console.log('[update] type=', ctx.updateType, 'from=', ctx.from?.id, 'chat=', ctx.chat?.id);
   if (!isAllowed(ctx)) {
+    console.log('[auth] blocked by whitelist user=', ctx.from?.id);
     await ctx.reply('Ban khong nam trong whitelist.');
     return;
   }
@@ -265,16 +267,20 @@ bot.command('status', async (ctx) => {
 bot.command('create', async (ctx) => {
   const rawInput = ctx.message?.text || ctx.message?.caption || '';
   const prompt = rawInput.replace('/create', '').trim();
+  console.log('[create] rawInput=', rawInput);
   if (!prompt) {
+    console.log('[create] missing prompt');
     await ctx.reply('Sai cu phap. Dung: /create <prompt>');
     return;
   }
   const photos = ctx.message.photo || [];
+  console.log('[create] hasPhoto=', photos.length > 0, 'photoCount=', photos.length);
   if (photos.length === 0) {
     await ctx.reply('Hay gui /create <prompt> kem 1 anh.');
     return;
   }
   const bestPhoto = photos[photos.length - 1];
+  console.log('[create] fetch telegram file_id=', bestPhoto.file_id);
   const file = await bot.telegram.getFile(bestPhoto.file_id);
   const telegramFileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
   const seed = String(Date.now());
@@ -293,6 +299,7 @@ bot.command('create', async (ctx) => {
       mimeType: 'image/jpeg',
     },
   });
+  console.log('[create] queued job=', jobId, 'chatId=', ctx.chat.id);
 
   await ctx.reply(`Da xep hang: ${jobId}`);
 });
@@ -345,8 +352,10 @@ app.use(express.json());
 app.get('/healthz', (_, res) => res.status(200).json({ ok: true }));
 
 app.post(WEBHOOK_PATH, (req, res) => {
+  console.log('[webhook] incoming update_id=', req.body?.update_id, 'keys=', Object.keys(req.body || {}));
   const secret = req.headers['x-telegram-bot-api-secret-token'];
   if (secret !== WEBHOOK_SECRET) {
+    console.log('[webhook] unauthorized secret mismatch');
     res.status(401).send('unauthorized');
     return;
   }
