@@ -224,6 +224,7 @@ const app = express();
 const bot = new Telegraf(BOT_TOKEN);
 const pool = new AccountPool(POLLO_ACCOUNTS);
 const jobState = new Map();
+const pendingCreate = new Map();
 
 function isAllowed(ctx) {
   if (ALLOWED_USER_IDS.size === 0) return true;
@@ -276,7 +277,8 @@ bot.command('create', async (ctx) => {
   const photos = ctx.message.photo || [];
   console.log('[create] hasPhoto=', photos.length > 0, 'photoCount=', photos.length);
   if (photos.length === 0) {
-    await ctx.reply('Hay gui /create <prompt> kem 1 anh.');
+    pendingCreate.set(String(ctx.from?.id || ''), { prompt, createdAt: Date.now() });
+    await ctx.reply('Da nhan prompt. Gio hay gui 1 anh de bat dau tao.');
     return;
   }
   const bestPhoto = photos[photos.length - 1];
@@ -301,6 +303,40 @@ bot.command('create', async (ctx) => {
   });
   console.log('[create] queued job=', jobId, 'chatId=', ctx.chat.id);
 
+  await ctx.reply(`Da xep hang: ${jobId}`);
+});
+
+bot.on('photo', async (ctx) => {
+  const uid = String(ctx.from?.id || '');
+  const pending = pendingCreate.get(uid);
+  if (!pending) return;
+  if (Date.now() - pending.createdAt > 10 * 60 * 1000) {
+    pendingCreate.delete(uid);
+    await ctx.reply('Prompt da het han. Hay gui lai /create <prompt>.');
+    return;
+  }
+
+  const photos = ctx.message.photo || [];
+  if (photos.length === 0) return;
+  const bestPhoto = photos[photos.length - 1];
+  const file = await bot.telegram.getFile(bestPhoto.file_id);
+  const telegramFileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+  const seed = String(Date.now());
+  const jobId = `job_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+  jobState.set(jobId, { status: 'queued', createdAt: Date.now(), seed, prompt: pending.prompt });
+  queue.push({
+    jobId,
+    chatId: ctx.chat.id,
+    seed,
+    prompt: {
+      text: pending.prompt,
+      imageUrl: telegramFileUrl,
+      filename: `telegram_${bestPhoto.file_id}.jpg`,
+      mimeType: 'image/jpeg',
+    },
+  });
+  pendingCreate.delete(uid);
   await ctx.reply(`Da xep hang: ${jobId}`);
 });
 
