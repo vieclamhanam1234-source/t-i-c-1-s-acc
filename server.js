@@ -263,7 +263,8 @@ bot.command('status', async (ctx) => {
 });
 
 bot.command('create', async (ctx) => {
-  const prompt = (ctx.message.text || '').replace('/create', '').trim();
+  const rawInput = ctx.message?.text || ctx.message?.caption || '';
+  const prompt = rawInput.replace('/create', '').trim();
   if (!prompt) {
     await ctx.reply('Sai cu phap. Dung: /create <prompt>');
     return;
