@@ -7,6 +7,9 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || '/telegram/webhook';
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change-me';
 const BASE_URL = process.env.BASE_URL;
+const POLLO_SESSION_TOKEN = process.env.POLLO_SESSION_TOKEN;
+const POLLO_CSRF_TOKEN = process.env.POLLO_CSRF_TOKEN;
+const POLLO_IMAGE_URL = process.env.POLLO_IMAGE_URL;
 const ALLOWED_USER_IDS = new Set(
   (process.env.ALLOWED_USER_IDS || '')
     .split(',')
@@ -23,6 +26,15 @@ if (!BOT_TOKEN) {
 }
 if (!BASE_URL) {
   throw new Error('Missing BASE_URL');
+}
+if (!POLLO_SESSION_TOKEN) {
+  throw new Error('Missing POLLO_SESSION_TOKEN');
+}
+if (!POLLO_CSRF_TOKEN) {
+  throw new Error('Missing POLLO_CSRF_TOKEN');
+}
+if (!POLLO_IMAGE_URL) {
+  throw new Error('Missing POLLO_IMAGE_URL');
 }
 if (POLLO_ACCOUNTS.length === 0) {
   throw new Error('Missing POLLO_ACCOUNTS');
@@ -83,6 +95,54 @@ class JobQueue {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+async function createImageOnPollo({ prompt }) {
+  const url = 'https://pollo.ai/api/trpc/image2Image.create?batch=1';
+  const payload = {
+    0: {
+      json: {
+        projectId: 'cmof6s7i904jdoguj5o8pxnqi',
+        entryCode: 'ImageToImage',
+        modelName: 'openai-gpt-image-2-0',
+        imageUrl: POLLO_IMAGE_URL,
+        images: [POLLO_IMAGE_URL],
+        prompt,
+        aspectRatio: '9:16',
+        resolution: '1K',
+        quality: 'medium',
+        numOutputs: 1,
+        mode: 'standard',
+        outputFormat: 'png',
+        outputQuality: 80,
+        enableTranslatePrompt: false,
+        enableMagicPrompt: false,
+        published: true,
+        protectionMode: false,
+        resourceObj: { resource_type: '' },
+      },
+    },
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      accept: '*/*',
+      'content-type': 'application/json',
+      origin: 'https://pollo.ai',
+      referer: 'https://pollo.ai/create?target=image-to-image',
+      'user-agent': 'Mozilla/5.0',
+      cookie: `__Secure-next-auth.session-token=${POLLO_SESSION_TOKEN}; __Host-next-auth.csrf-token=${POLLO_CSRF_TOKEN}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Pollo HTTP ${res.status}: ${text.slice(0, 300)}`);
+  const data = JSON.parse(text);
+  const taskId = data[0]?.result?.data?.json?.id || data[0]?.result?.id;
+  if (!taskId) throw new Error('Pollo response missing task ID');
+  return String(taskId);
+}
+
 async function createVideoOnPollo({ prompt, seed, accountToken }) {
   // TODO: Replace this mock with real Pollo API call.
   // Example flow:
@@ -118,7 +178,21 @@ bot.start(async (ctx) => {
 });
 
 bot.command('help', async (ctx) => {
-  await ctx.reply('/create <seed>|<prompt>\n/status <job_id>');
+  await ctx.reply('/create <seed>|<prompt>\n/gen <prompt>\n/status <job_id>');
+});
+
+bot.command('gen', async (ctx) => {
+  const prompt = (ctx.message.text || '').replace('/gen', '').trim();
+  if (!prompt) {
+    await ctx.reply('Dung: /gen <prompt>');
+    return;
+  }
+  try {
+    const taskId = await createImageOnPollo({ prompt });
+    await ctx.reply(`Da tao request anh. Task ID: ${taskId}`);
+  } catch (err) {
+    await ctx.reply(`Tao anh that bai: ${err.message}`);
+  }
 });
 
 bot.command('status', async (ctx) => {
