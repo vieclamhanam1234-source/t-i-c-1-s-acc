@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const { Telegraf } = require('telegraf');
+const { spawn } = require('child_process');
 
 const PORT = Number(process.env.PORT || 3000);
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -87,60 +88,33 @@ class JobQueue {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function createImageOnPollo({ prompt, account }) {
-  if (!account.sessionToken || !account.csrfToken) {
-    throw new Error(`Account ${account.id} invalid. Need session|csrf`);
-  }
-  const imageUrl = await uploadTelegramImageToPollo({
-    account,
-    telegramFileUrl: prompt.imageUrl,
-    filename: prompt.filename,
-    mimeType: prompt.mimeType,
+async function runPolloWorker({ account, promptText, imageUrl }) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      'worker.py',
+      '--session', account.sessionToken,
+      '--csrf', account.csrfToken,
+      '--prompt', promptText,
+      '--image-url', imageUrl,
+    ];
+    const py = spawn('python', args, { cwd: process.cwd() });
+    let stdout = '';
+    let stderr = '';
+    py.stdout.on('data', (d) => { stdout += d.toString(); });
+    py.stderr.on('data', (d) => { stderr += d.toString(); });
+    py.on('error', (e) => reject(new Error(`spawn python failed: ${e.message}`)));
+    py.on('close', (code) => {
+      const out = stdout.trim().split('\n').filter(Boolean).pop() || '';
+      if (code !== 0) return reject(new Error(stderr || out || `worker exit ${code}`));
+      try {
+        const data = JSON.parse(out);
+        if (!data.ok) return reject(new Error(data.error || 'worker failed'));
+        resolve(data);
+      } catch (e) {
+        reject(new Error(`worker invalid json: ${out.slice(0, 300)}`));
+      }
+    });
   });
-  const url = 'https://pollo.ai/api/trpc/image2Image.create?batch=1';
-  const payload = {
-    0: {
-      json: {
-        projectId: 'cmof6s7i904jdoguj5o8pxnqi',
-        entryCode: 'ImageToImage',
-        modelName: 'openai-gpt-image-2-0',
-        imageUrl,
-        images: [imageUrl],
-        prompt: prompt.text,
-        aspectRatio: '9:16',
-        resolution: '1K',
-        quality: 'medium',
-        numOutputs: 1,
-        mode: 'standard',
-        outputFormat: 'png',
-        outputQuality: 80,
-        enableTranslatePrompt: false,
-        enableMagicPrompt: false,
-        published: true,
-        protectionMode: false,
-        resourceObj: { resource_type: '' },
-      },
-    },
-  };
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      accept: '*/*',
-      'content-type': 'application/json',
-      origin: 'https://pollo.ai',
-      referer: 'https://pollo.ai/create?target=image-to-image',
-      'user-agent': 'Mozilla/5.0',
-      cookie: `__Secure-next-auth.session-token=${account.sessionToken}; __Host-next-auth.csrf-token=${account.csrfToken}`,
-    },
-    body: JSON.stringify(payload),
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Pollo HTTP ${res.status}: ${text.slice(0, 220)}`);
-  const data = JSON.parse(text);
-  const taskId = data[0]?.result?.data?.json?.id || data[0]?.result?.id;
-  if (!taskId) throw new Error('Pollo response missing task ID');
-  return String(taskId);
 }
 
 async function uploadTelegramImageToPollo({ account, telegramFileUrl, filename, mimeType }) {
@@ -177,48 +151,6 @@ async function uploadTelegramImageToPollo({ account, telegramFileUrl, filename, 
   return signData.accessURL;
 }
 
-async function checkImageStatus({ account, taskId }) {
-  const input = JSON.stringify({ 0: { json: { id: Number(taskId) } } });
-  const res = await fetch(
-    `https://pollo.ai/api/trpc/generation.queryRecordDetail?batch=1&input=${encodeURIComponent(input)}`,
-    {
-      method: 'GET',
-      headers: {
-        accept: '*/*',
-        origin: 'https://pollo.ai',
-        referer: 'https://pollo.ai/create?target=image-to-image',
-        'user-agent': 'Mozilla/5.0',
-        cookie: `__Secure-next-auth.session-token=${account.sessionToken}; __Host-next-auth.csrf-token=${account.csrfToken}`,
-      },
-    }
-  );
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Check status HTTP ${res.status}: ${text.slice(0, 200)}`);
-  const data = JSON.parse(text);
-  return data[0]?.result?.data?.json || {};
-}
-
-async function waitForImageResult({ account, taskId, maxAttempts = 40, intervalMs = 4000 }) {
-  for (let i = 0; i < maxAttempts; i += 1) {
-    const statusData = await checkImageStatus({ account, taskId });
-    const status = String(statusData?.status || '').toLowerCase();
-    const outputUrls =
-      statusData?.images ||
-      statusData?.outputImages ||
-      statusData?.imageUrls ||
-      statusData?.outputs ||
-      [];
-    const firstUrl = Array.isArray(outputUrls)
-      ? outputUrls.find((v) => typeof v === 'string' && v.startsWith('http'))
-      : null;
-
-    if (firstUrl) return { status: 'succeed', imageUrl: firstUrl };
-    if (status.includes('fail')) return { status: 'failed', message: statusData?.failMsg || 'Generation failed' };
-    if (status.includes('succeed') && !firstUrl) return { status: 'succeed', imageUrl: null };
-    await sleep(intervalMs);
-  }
-  return { status: 'timeout' };
-}
 
 const app = express();
 const bot = new Telegraf(BOT_TOKEN);
@@ -351,27 +283,21 @@ const queue = new JobQueue(async (job) => {
 
   try {
     jobState.set(job.jobId, { ...jobState.get(job.jobId), status: `running_acc_${account.id}` });
-    const taskId = await createImageOnPollo({
-      prompt: job.prompt,
+    const workerResult = await runPolloWorker({
       account,
+      promptText: job.prompt.text,
+      imageUrl: job.prompt.imageUrl,
     });
-
-    jobState.set(job.jobId, { ...jobState.get(job.jobId), status: 'processing', taskId });
-    await bot.telegram.sendMessage(job.chatId, `Job ${job.jobId} da tao request. Task ID: ${taskId}. Dang doi ket qua...`);
-
-    const result = await waitForImageResult({ account, taskId });
-    if (result.status === 'succeed' && result.imageUrl) {
-      jobState.set(job.jobId, { ...jobState.get(job.jobId), status: 'done', taskId, imageUrl: result.imageUrl });
+    const taskId = workerResult.task_id || 'unknown';
+    if (workerResult.image_url) {
+      jobState.set(job.jobId, { ...jobState.get(job.jobId), status: 'done', taskId, imageUrl: workerResult.image_url });
       try {
-        await bot.telegram.sendPhoto(job.chatId, result.imageUrl, {
+        await bot.telegram.sendPhoto(job.chatId, workerResult.image_url, {
           caption: `Job ${job.jobId} xong.\nTask ID: ${taskId}`,
         });
       } catch (_) {
-        await bot.telegram.sendMessage(job.chatId, `Job ${job.jobId} xong: ${result.imageUrl}`);
+        await bot.telegram.sendMessage(job.chatId, `Job ${job.jobId} xong: ${workerResult.image_url}`);
       }
-    } else if (result.status === 'failed') {
-      jobState.set(job.jobId, { ...jobState.get(job.jobId), status: `failed: ${result.message}`, taskId });
-      await bot.telegram.sendMessage(job.chatId, `Job ${job.jobId} that bai: ${result.message}`);
     } else {
       jobState.set(job.jobId, { ...jobState.get(job.jobId), status: 'timeout_wait_result', taskId });
       await bot.telegram.sendMessage(job.chatId, `Job ${job.jobId} timeout khi doi ket qua. Task ID: ${taskId}`);
