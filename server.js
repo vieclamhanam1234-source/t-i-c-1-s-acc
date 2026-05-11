@@ -1,13 +1,13 @@
 require('dotenv').config();
 const express = require('express');
 const { Telegraf } = require('telegraf');
-const { spawn } = require('child_process');
 
 const PORT = Number(process.env.PORT || 3000);
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || '/telegram/webhook';
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change-me';
 const BASE_URL = process.env.BASE_URL;
+const WORKER_URL = process.env.WORKER_URL;
 const ALLOWED_USER_IDS = new Set(
   (process.env.ALLOWED_USER_IDS || '')
     .split(',')
@@ -24,6 +24,9 @@ if (!BOT_TOKEN) {
 }
 if (!BASE_URL) {
   throw new Error('Missing BASE_URL');
+}
+if (!WORKER_URL) {
+  throw new Error('Missing WORKER_URL');
 }
 if (POLLO_ACCOUNTS.length === 0) {
   throw new Error('Missing POLLO_ACCOUNTS');
@@ -89,32 +92,30 @@ class JobQueue {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function runPolloWorker({ account, promptText, imageUrl }) {
-  return new Promise((resolve, reject) => {
-    const args = [
-      'worker.py',
-      '--session', account.sessionToken,
-      '--csrf', account.csrfToken,
-      '--prompt', promptText,
-      '--image-url', imageUrl,
-    ];
-    const py = spawn('python3', args, { cwd: process.cwd() });
-    let stdout = '';
-    let stderr = '';
-    py.stdout.on('data', (d) => { stdout += d.toString(); });
-    py.stderr.on('data', (d) => { stderr += d.toString(); });
-    py.on('error', (e) => reject(new Error(`spawn python failed: ${e.message}`)));
-    py.on('close', (code) => {
-      const out = stdout.trim().split('\n').filter(Boolean).pop() || '';
-      if (code !== 0) return reject(new Error(stderr || out || `worker exit ${code}`));
-      try {
-        const data = JSON.parse(out);
-        if (!data.ok) return reject(new Error(data.error || 'worker failed'));
-        resolve(data);
-      } catch (e) {
-        reject(new Error(`worker invalid json: ${out.slice(0, 300)}`));
-      }
-    });
+  const res = await fetch(`${WORKER_URL.replace(/\/+$/, '')}/generate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      session: account.sessionToken,
+      csrf: account.csrfToken,
+      prompt: promptText,
+      image_url: imageUrl,
+    }),
   });
+  const text = await res.text();
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch (_) {
+    throw new Error(`worker non-json HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
+  if (!res.ok) {
+    throw new Error(data?.detail || `worker HTTP ${res.status}`);
+  }
+  if (!data?.ok) {
+    throw new Error(data?.error || 'worker failed');
+  }
+  return data;
 }
 
 async function uploadTelegramImageToPollo({ account, telegramFileUrl, filename, mimeType }) {
