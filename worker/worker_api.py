@@ -101,34 +101,37 @@ def generate(inp: GenerateIn):
         }
     }
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-        context.add_cookies([to_pw_cookie(c) for c in cookies_raw])
-        page = context.new_page()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context()
+            context.add_cookies([to_pw_cookie(c) for c in cookies_raw])
+            page = context.new_page()
 
-        try:
-            page.goto('https://pollo.ai/create?target=image-to-image', wait_until='domcontentloaded', timeout=60000)
-            out = page.evaluate(
-                """
-                async ({payload}) => {
-                  const res = await fetch('https://pollo.ai/api/trpc/image2Image.create?batch=1', {
-                    method: 'POST',
-                    credentials: 'include',
-                    headers: {
-                      'accept': '*/*',
-                      'content-type': 'application/json'
-                    },
-                    body: JSON.stringify(payload)
-                  });
-                  const text = await res.text();
-                  return { status: res.status, text };
-                }
-                """,
-                {'payload': payload},
-            )
-        finally:
-            browser.close()
+            try:
+                page.goto('https://pollo.ai/create?target=image-to-image', wait_until='domcontentloaded', timeout=60000)
+                out = page.evaluate(
+                    """
+                    async ({payload}) => {
+                      const res = await fetch('https://pollo.ai/api/trpc/image2Image.create?batch=1', {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: {
+                          'accept': '*/*',
+                          'content-type': 'application/json'
+                        },
+                        body: JSON.stringify(payload)
+                      });
+                      const text = await res.text();
+                      return { status: res.status, text };
+                    }
+                    """,
+                    {'payload': payload},
+                )
+            finally:
+                browser.close()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f'create request failed: {str(e)[:240]}')
 
     if out.get('status') != 200:
         raise HTTPException(status_code=502, detail=f"create HTTP {out.get('status')}: {out.get('text','')[:240]}")
