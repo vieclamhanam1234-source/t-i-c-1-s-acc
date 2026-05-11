@@ -17,12 +17,7 @@ def launch_browser_safe(playwright):
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--single-process',
             '--no-zygote',
-            '--disable-software-rasterizer',
-            '--disable-background-networking',
-            '--disable-extensions',
-            '--disable-features=site-per-process,IsolateOrigins',
         ],
     )
 
