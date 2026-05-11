@@ -97,7 +97,7 @@ async function runPolloWorker({ account, promptText, imageUrl }) {
       '--prompt', promptText,
       '--image-url', imageUrl,
     ];
-    const py = spawn('python', args, { cwd: process.cwd() });
+    const py = spawn('python3', args, { cwd: process.cwd() });
     let stdout = '';
     let stderr = '';
     py.stdout.on('data', (d) => { stdout += d.toString(); });
