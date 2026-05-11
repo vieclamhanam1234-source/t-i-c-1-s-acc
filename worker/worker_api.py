@@ -1,10 +1,8 @@
-from urllib.parse import quote
 import json
 import time
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from curl_cffi import requests
 from playwright.sync_api import sync_playwright
 
 app = FastAPI()
@@ -36,20 +34,27 @@ def healthz():
 
 @app.post('/generate')
 def generate(inp: GenerateIn):
-    cookies = {
-        '__Secure-next-auth.session-token': inp.session,
-        '__Host-next-auth.csrf-token': inp.csrf,
-    }
-    headers = {
-        'accept': '*/*',
-        'content-type': 'application/json',
-        'origin': 'https://pollo.ai',
-        'referer': 'https://pollo.ai/create?target=image-to-image',
-        'user-agent': 'Mozilla/5.0',
-    }
-
-    s = requests.Session(impersonate='chrome120')
-    s.cookies.update(cookies)
+    browser = None
+    cookies = [
+        {
+            'name': '__Secure-next-auth.session-token',
+            'value': inp.session,
+            'domain': 'pollo.ai',
+            'path': '/',
+            'httpOnly': True,
+            'secure': True,
+            'sameSite': 'Lax',
+        },
+        {
+            'name': '__Host-next-auth.csrf-token',
+            'value': inp.csrf,
+            'domain': 'pollo.ai',
+            'path': '/',
+            'httpOnly': True,
+            'secure': True,
+            'sameSite': 'Lax',
+        },
+    ]
 
     payload = {
         '0': {
@@ -76,53 +81,88 @@ def generate(inp: GenerateIn):
         }
     }
 
-    create = s.post(
-        'https://pollo.ai/api/trpc/image2Image.create?batch=1',
-        json=payload,
-        headers=headers,
-        timeout=60,
-    )
-    if create.status_code != 200:
-        raise HTTPException(status_code=502, detail=f'create HTTP {create.status_code}: {create.text[:240]}')
-
     try:
-        data = create.json()
-    except Exception:
-        raise HTTPException(status_code=502, detail=f'create non-json: {create.text[:240]}')
+        with sync_playwright() as p:
+            browser = launch_browser_safe(p)
+            context = browser.new_context()
+            context.add_cookies(cookies)
+            page = context.new_page()
 
-    task_id = data[0].get('result', {}).get('data', {}).get('json', {}).get('id')
-    if not task_id:
-        raise HTTPException(status_code=502, detail='missing task_id')
+            page.goto('https://pollo.ai/create?target=image-to-image', wait_until='domcontentloaded', timeout=60000)
 
-    for _ in range(40):
-        encoded = quote(json.dumps({'0': {'json': {'id': int(task_id)}}}))
-        st = s.get(
-            f'https://pollo.ai/api/trpc/generation.queryRecordDetail?batch=1&input={encoded}',
-            headers={
-                'accept': '*/*',
-                'origin': 'https://pollo.ai',
-                'referer': 'https://pollo.ai/create?target=image-to-image',
-                'user-agent': 'Mozilla/5.0',
-            },
-            timeout=60,
-        )
-        if st.status_code != 200:
-            time.sleep(4)
-            continue
-        try:
-            body = st.json()[0].get('result', {}).get('data', {}).get('json', {})
-        except Exception:
-            time.sleep(4)
-            continue
+            create_out = page.evaluate(
+                """
+                async ({payload}) => {
+                  const res = await fetch('https://pollo.ai/api/trpc/image2Image.create?batch=1', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: {
+                      'accept': '*/*',
+                      'content-type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                  });
+                  const text = await res.text();
+                  return { status: res.status, text };
+                }
+                """,
+                {'payload': payload},
+            )
+            if create_out.get('status') != 200:
+                raise HTTPException(status_code=502, detail=f"create HTTP {create_out.get('status')}: {create_out.get('text','')[:240]}")
 
-        status = str(body.get('status', '')).lower()
-        outputs = body.get('images') or body.get('outputImages') or body.get('imageUrls') or body.get('outputs') or []
-        image_url = next((x for x in outputs if isinstance(x, str) and x.startswith('http')), None) if isinstance(outputs, list) else None
+            try:
+                create_data = json.loads(create_out.get('text', ''))
+            except Exception:
+                raise HTTPException(status_code=502, detail=f"create non-json: {create_out.get('text','')[:240]}")
 
-        if image_url:
-            return {'ok': True, 'task_id': str(task_id), 'image_url': image_url}
-        if 'fail' in status:
-            raise HTTPException(status_code=502, detail=body.get('failMsg') or 'generation failed')
-        time.sleep(4)
+            task_id = create_data[0].get('result', {}).get('data', {}).get('json', {}).get('id')
+            if not task_id:
+                raise HTTPException(status_code=502, detail='missing task_id')
 
-    return {'ok': True, 'task_id': str(task_id), 'timeout': True, 'image_url': None}
+            for _ in range(40):
+                status_out = page.evaluate(
+                    """
+                    async ({taskId}) => {
+                      const input = JSON.stringify({0:{json:{id:Number(taskId)}}});
+                      const url = `https://pollo.ai/api/trpc/generation.queryRecordDetail?batch=1&input=${encodeURIComponent(input)}`;
+                      const res = await fetch(url, {
+                        method: 'GET',
+                        credentials: 'include',
+                        headers: {'accept': '*/*'}
+                      });
+                      const text = await res.text();
+                      return { status: res.status, text };
+                    }
+                    """,
+                    {'taskId': task_id},
+                )
+                if status_out.get('status') != 200:
+                    time.sleep(4)
+                    continue
+                try:
+                    body = json.loads(status_out.get('text', ''))[0].get('result', {}).get('data', {}).get('json', {})
+                except Exception:
+                    time.sleep(4)
+                    continue
+
+                status = str(body.get('status', '')).lower()
+                outputs = body.get('images') or body.get('outputImages') or body.get('imageUrls') or body.get('outputs') or []
+                image_url = next((x for x in outputs if isinstance(x, str) and x.startswith('http')), None) if isinstance(outputs, list) else None
+                if image_url:
+                    return {'ok': True, 'task_id': str(task_id), 'image_url': image_url}
+                if 'fail' in status:
+                    raise HTTPException(status_code=502, detail=body.get('failMsg') or 'generation failed')
+                time.sleep(4)
+
+            return {'ok': True, 'task_id': str(task_id), 'timeout': True, 'image_url': None}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f'create request failed: {str(e)[:240]}')
+    finally:
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
