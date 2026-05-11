@@ -1,7 +1,3 @@
-from urllib.parse import quote
-import json
-import time
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from curl_cffi import requests
@@ -81,35 +77,4 @@ def generate(inp: GenerateIn):
     if not task_id:
         raise HTTPException(status_code=502, detail='missing task_id')
 
-    for _ in range(40):
-        encoded = quote(json.dumps({'0': {'json': {'id': int(task_id)}}}))
-        st = s.get(
-            f'https://pollo.ai/api/trpc/generation.queryRecordDetail?batch=1&input={encoded}',
-            headers={
-                'accept': '*/*',
-                'origin': 'https://pollo.ai',
-                'referer': 'https://pollo.ai/create?target=image-to-image',
-                'user-agent': 'Mozilla/5.0',
-            },
-            timeout=60,
-        )
-        if st.status_code != 200:
-            time.sleep(4)
-            continue
-        try:
-            body = st.json()[0].get('result', {}).get('data', {}).get('json', {})
-        except Exception:
-            time.sleep(4)
-            continue
-
-        status = str(body.get('status', '')).lower()
-        outputs = body.get('images') or body.get('outputImages') or body.get('imageUrls') or body.get('outputs') or []
-        image_url = next((x for x in outputs if isinstance(x, str) and x.startswith('http')), None) if isinstance(outputs, list) else None
-
-        if image_url:
-            return {'ok': True, 'task_id': str(task_id), 'image_url': image_url}
-        if 'fail' in status:
-            raise HTTPException(status_code=502, detail=body.get('failMsg') or 'generation failed')
-        time.sleep(4)
-
-    return {'ok': True, 'task_id': str(task_id), 'timeout': True, 'image_url': None}
+    return {'ok': True, 'task_id': str(task_id)}
