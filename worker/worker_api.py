@@ -5,8 +5,21 @@ import time
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from curl_cffi import requests
+from playwright.sync_api import sync_playwright
 
 app = FastAPI()
+
+
+def launch_browser_safe(playwright):
+    return playwright.chromium.launch(
+        headless=True,
+        args=[
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+        ],
+    )
 
 
 class GenerateIn(BaseModel):
