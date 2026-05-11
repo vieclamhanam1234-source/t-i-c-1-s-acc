@@ -153,6 +153,42 @@ async function uploadTelegramImageToPollo({ account, telegramFileUrl, filename, 
   return signData.accessURL;
 }
 
+async function checkImageStatus({ account, taskId }) {
+  const input = JSON.stringify({ 0: { json: { id: Number(taskId) } } });
+  const res = await fetch(
+    `https://pollo.ai/api/trpc/generation.queryRecordDetail?batch=1&input=${encodeURIComponent(input)}`,
+    {
+      method: 'GET',
+      headers: {
+        accept: '*/*',
+        origin: 'https://pollo.ai',
+        referer: 'https://pollo.ai/create?target=image-to-image',
+        'user-agent': 'Mozilla/5.0',
+        cookie: `__Secure-next-auth.session-token=${account.sessionToken}; __Host-next-auth.csrf-token=${account.csrfToken}`,
+      },
+    }
+  );
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Check status HTTP ${res.status}: ${text.slice(0, 200)}`);
+  const data = JSON.parse(text);
+  return data[0]?.result?.data?.json || {};
+}
+
+async function waitForImageUrl({ account, taskId, maxAttempts = 40, intervalMs = 4000 }) {
+  for (let i = 0; i < maxAttempts; i += 1) {
+    const statusData = await checkImageStatus({ account, taskId });
+    const status = String(statusData?.status || '').toLowerCase();
+    const outputUrls = statusData?.images || statusData?.outputImages || statusData?.imageUrls || statusData?.outputs || [];
+    const firstUrl = Array.isArray(outputUrls)
+      ? outputUrls.find((v) => typeof v === 'string' && v.startsWith('http'))
+      : null;
+    if (firstUrl) return { status: 'succeed', imageUrl: firstUrl };
+    if (status.includes('fail')) return { status: 'failed', message: statusData?.failMsg || 'Generation failed' };
+    await sleep(intervalMs);
+  }
+  return { status: 'timeout' };
+}
+
 
 const app = express();
 const bot = new Telegraf(BOT_TOKEN);
@@ -291,15 +327,19 @@ const queue = new JobQueue(async (job) => {
       imageUrl: job.prompt.imageUrl,
     });
     const taskId = workerResult.task_id || 'unknown';
-    if (workerResult.image_url) {
-      jobState.set(job.jobId, { ...jobState.get(job.jobId), status: 'done', taskId, imageUrl: workerResult.image_url });
-      try {
-        await bot.telegram.sendPhoto(job.chatId, workerResult.image_url, {
-          caption: `Job ${job.jobId} xong.\nTask ID: ${taskId}`,
-        });
-      } catch (_) {
-        await bot.telegram.sendMessage(job.chatId, `Job ${job.jobId} xong: ${workerResult.image_url}`);
-      }
+    await bot.telegram.sendMessage(job.chatId, `Job ${job.jobId} da tao request. Task ID: ${taskId}. Dang doi ket qua...`);
+    const result = await waitForImageUrl({ account, taskId });
+    if (result.status === 'succeed' && result.imageUrl) {
+      const imgRes = await fetch(result.imageUrl);
+      if (!imgRes.ok) throw new Error(`Download result image failed: HTTP ${imgRes.status}`);
+      const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
+      jobState.set(job.jobId, { ...jobState.get(job.jobId), status: 'done', taskId });
+      await bot.telegram.sendPhoto(job.chatId, { source: imgBuffer }, {
+        caption: `Job ${job.jobId} xong.\nTask ID: ${taskId}`,
+      });
+    } else if (result.status === 'failed') {
+      jobState.set(job.jobId, { ...jobState.get(job.jobId), status: `failed: ${result.message}`, taskId });
+      await bot.telegram.sendMessage(job.chatId, `Job ${job.jobId} that bai: ${result.message}`);
     } else {
       jobState.set(job.jobId, { ...jobState.get(job.jobId), status: 'timeout_wait_result', taskId });
       await bot.telegram.sendMessage(job.chatId, `Job ${job.jobId} timeout khi doi ket qua. Task ID: ${taskId}`);
