@@ -3,6 +3,7 @@ const express = require('express');
 const { Telegraf } = require('telegraf');
 
 const PORT = Number(process.env.PORT || 3000);
+const BOT_VERSION = 'worker-http-v1';
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || '/telegram/webhook';
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change-me';
@@ -333,6 +334,7 @@ async function bootstrap() {
   });
 
   app.listen(PORT, () => {
+    console.log(`BOT_VERSION=${BOT_VERSION}`);
     console.log(`Server listening on ${PORT}`);
     console.log(`Webhook: ${webhookUrl}`);
   });
