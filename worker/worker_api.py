@@ -103,7 +103,15 @@ def generate(inp: GenerateIn):
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                ],
+            )
             context = browser.new_context()
             context.add_cookies([to_pw_cookie(c) for c in cookies_raw])
             page = context.new_page()
